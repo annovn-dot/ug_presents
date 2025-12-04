@@ -30,7 +30,7 @@ Config.NoPresentNearbyMessage = 'No present nearby.'
 Config.PresentDeletedMessage  = 'Deleted present ID %d.'
 Config.PresentBlipsOnMessage  = 'Present blips enabled.'
 Config.PresentBlipsOffMessage = 'Present blips disabled.'
-Config.PresentExpiredMessage  = 'This present has expired.'
+Config.PresentExpiredMessage  = 'This present is empty ha-haa!'
 
 -- /presentcreate (no args) → random prop, no expiry
 -- /presentcreate 1 → prop index 1, no expiry
@@ -41,3 +41,4 @@ Config.PresentExpiredMessage  = 'This present has expired.'
 -- /presentlocate - ON/OFF
 -- /presentcleanexpired
 -- /presentcleaneup -- deletes all presents
+
