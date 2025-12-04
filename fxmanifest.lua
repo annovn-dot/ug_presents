@@ -1,10 +1,11 @@
-fx_version 'cerulean'
-game 'gta5'
+fx_version "cerulean"
+game "gta5"
+lua54 "yes"
 
-name 'ug_presents'
-description 'Simple present system with ox_inventory, ox_target and ox_lib'
-author 'You'
-lua54 'yes'
+author "BOGi"
+name "UG Presents"
+description "The Underground - Simple random present"
+version "4.2.0"
 
 shared_scripts {
     '@ox_lib/init.lua',
@@ -26,3 +27,4 @@ dependencies {
     'ox_target',
     'oxmysql'
 }
+
