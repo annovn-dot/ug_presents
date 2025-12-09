@@ -17,6 +17,10 @@ Config.OpenPresent            = {
     }
 }
 
+Config.PresentsWebhook        =
+''                                 -- your Discord webhook URL here
+Config.PresentsLogUsername    = 'The Underground presents'  
+
 Config.DeleteDistance         = 5.0
 
 Config.NotifyTitle            = 'Present'
@@ -41,4 +45,5 @@ Config.PresentExpiredMessage  = 'This present is empty ha-haa!'
 -- /presentlocate - ON/OFF
 -- /presentcleanexpired
 -- /presentcleaneup -- deletes all presents
+
 
