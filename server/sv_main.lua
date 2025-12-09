@@ -1,4 +1,4 @@
-local ESX, QBCore, QBOX
+local ESX, QBCore
 local activePresents = {}
 local processingPresents = {}
 local pendingPlacement = {}
@@ -11,24 +11,65 @@ CreateThread(function()
         else
             print('^1[ug_presents] Config.Framework = "esx" but es_extended is not started!^0')
         end
-    elseif Config.Framework == 'qb' then
+    elseif Config.Framework == 'qb' or Config.Framework == 'qbox' then
         if GetResourceState('qb-core') == 'started' then
             QBCore = exports['qb-core']:GetCoreObject()
-            print('[ug_presents] QB-Core framework detected.')
+            print('[ug_presents] QB-Core / QBOX (qb-core bridge) detected.')
         else
-            print('^1[ug_presents] Config.Framework = "qb" but qb-core is not started!^0')
-        end
-    elseif Config.Framework == 'qbox' then
-        if GetResourceState('qbx_core') == 'started' then
-            QBOX = exports['qbx_core']:GetCoreObject()
-            print('[ug_presents] QBOX framework detected.')
-        else
-            print('^1[ug_presents] Config.Framework = "qbox" but qbx_core is not started!^0')
+            print(('^1[ug_presents] Config.Framework = "%s" but qb-core is not started!^0'):format(Config.Framework))
         end
     else
         print('^1[ug_presents] Invalid Config.Framework, use "esx", "qb" or "qbox".^0')
     end
 end)
+
+local function GetPlayerInfo(src)
+    local name = GetPlayerName(src) or 'Unknown'
+    local identifier = 'unknown'
+    local cid = 'unknown'
+
+    if Config.Framework == 'esx' and ESX then
+        local xPlayer = ESX.GetPlayerFromId(src)
+        if xPlayer then
+            identifier = xPlayer.getIdentifier and xPlayer.getIdentifier() or xPlayer.identifier or identifier
+            name = xPlayer.getName and xPlayer.getName() or name
+        end
+    elseif (Config.Framework == 'qb' or Config.Framework == 'qbox') and QBCore then
+        local Player = QBCore.Functions.GetPlayer(src)
+        if Player and Player.PlayerData then
+            cid = Player.PlayerData.citizenid or cid
+            identifier = Player.PlayerData.license or Player.PlayerData.steam or cid or identifier
+
+            local charinfo = Player.PlayerData.charinfo
+            if charinfo and charinfo.firstname and charinfo.lastname then
+                name = (charinfo.firstname .. ' ' .. charinfo.lastname)
+            end
+        end
+    end
+
+    return name, identifier, cid
+end
+
+local function SendPresentLog(title, description, color, fields, footer)
+    local webhook = Config.PresentsWebhook or Config.DiscordWebhook
+    if not webhook or webhook == '' then return end
+
+    local embed = {
+        title = title,
+        description = description,
+        color = color or 0x2f3136,
+        footer = { text = footer or os.date('%Y-%m-%d %H:%M:%S') },
+        fields = fields,
+        timestamp = os.date('!%Y-%m-%dT%H:%M:%SZ')
+    }
+
+    PerformHttpRequest(webhook, function() end, 'POST', json.encode({
+        username = Config.PresentsLogUsername or 'ug_presents',
+        embeds = { embed }
+    }), {
+        ['Content-Type'] = 'application/json'
+    })
+end
 
 local function CanManagePresents(src)
     if Config.Framework == 'esx' and ESX then
@@ -41,16 +82,15 @@ local function CanManagePresents(src)
                 return true
             end
         end
-    elseif Config.Framework == 'qb' and QBCore then
-        for _, perm in ipairs(Config.QBPermissions or {}) do
-            if QBCore.Functions.HasPermission(src, perm) then
-                return true
-            end
+    elseif (Config.Framework == 'qb' or Config.Framework == 'qbox') and QBCore then
+        local perms = Config.QBOXPermissions
+        if Config.Framework == 'qb' then
+            perms = Config.QBPermissions
         end
-    elseif Config.Framework == 'qbox' and QBOX then
-        local perms = Config.QBOXPermissions or Config.QBPermissions or {}
+        perms = perms or Config.QBPermissions or { 'admin', 'god' }
+
         for _, perm in ipairs(perms) do
-            if QBOX.Functions.HasPermission(src, perm) then
+            if QBCore.Functions.HasPermission(src, perm) then
                 return true
             end
         end
@@ -73,6 +113,7 @@ MySQL.ready(function()
     MySQL.query('SELECT * FROM ug_presents', {}, function(rows)
         if not rows or #rows == 0 then
             print('[ug_presents] No presents to load from database.')
+            SendPresentLog('Presents Init', 'No presents to load from database on resource start.', 0x95a5a6)
             return
         end
 
@@ -100,6 +141,17 @@ MySQL.ready(function()
         end
 
         print(('[ug_presents] Loaded %d presents (cleaned %d expired on start)'):format(loaded, expiredCount))
+
+        SendPresentLog(
+            'Presents Init',
+            ('Resource started.\nLoaded **%d** presents.\nCleaned **%d** expired presents.'):format(loaded, expiredCount),
+            0x3498db,
+            {
+                { name = 'Loaded',          value = tostring(loaded),       inline = true },
+                { name = 'Expired Cleaned', value = tostring(expiredCount), inline = true },
+                { name = 'Total in DB',     value = tostring(#rows),        inline = true }
+            }
+        )
 
         for _, playerId in ipairs(GetPlayers()) do
             local src = tonumber(playerId)
@@ -129,6 +181,14 @@ RegisterCommand('presentcreate', function(source, args, _)
             title = Config.NotifyTitle,
             description = Config.NoPermissionMessage
         })
+
+        local name, identifier, cid = GetPlayerInfo(source)
+        SendPresentLog(
+            'Present Create - No Permission',
+            ('%s (%s) tried to use `/presentcreate` without permission.'):format(name, identifier),
+            0xe74c3c
+        )
+
         return
     end
 
@@ -201,12 +261,28 @@ RegisterCommand('presentcreate', function(source, args, _)
         title = Config.NotifyTitle,
         description = 'Placement mode: [Enter/E] place, [←/→] rotate, [Backspace] cancel.'
     })
+
+    local name, identifier, cid = GetPlayerInfo(src)
+    SendPresentLog(
+        'Present Placement Started',
+        ('%s (%s) started placement for model `%s`.'):format(name, identifier, modelName),
+        0x1abc9c,
+        {
+            { name = 'Expiry (hours)', value = expiryHours and tostring(expiryHours) or 'None', inline = true }
+        }
+    )
 end, false)
 
 RegisterNetEvent('ug_presents:placePresent', function(x, y, z, heading)
     local src = source
 
     if not CanManagePresents(src) then
+        local name, identifier = GetPlayerInfo(src)
+        SendPresentLog(
+            'Present Place - No Permission',
+            ('%s (%s) tried to place a present without permission.'):format(name, identifier),
+            0xe74c3c
+        )
         return
     end
 
@@ -239,6 +315,13 @@ RegisterNetEvent('ug_presents:placePresent', function(x, y, z, heading)
     }, function(insertId)
         if not insertId then
             print('[ug_presents] Failed to insert present into DB (placement)')
+
+            local name, identifier = GetPlayerInfo(src)
+            SendPresentLog(
+                'Present Place - DB Error',
+                ('%s (%s) tried to place model `%s` but DB insert failed.'):format(name, identifier, modelName),
+                0xe74c3c
+            )
             return
         end
 
@@ -263,6 +346,23 @@ RegisterNetEvent('ug_presents:placePresent', function(x, y, z, heading)
                 expiresAt and (', expires in ~' .. expiryHours .. 'h') or ''
             )
         })
+
+        local name, identifier, cid = GetPlayerInfo(src)
+        local fields = {
+            { name = 'Present ID', value = tostring(insertId),                                          inline = true },
+            { name = 'Model',      value = tostring(modelName),                                         inline = true },
+            { name = 'Coords',     value = ('x=%.2f, y=%.2f, z=%.2f, h=%.2f'):format(x, y, z, heading), inline = false }
+        }
+        if expiryHours then
+            fields[#fields + 1] = { name = 'Expires In', value = tostring(expiryHours) .. 'h', inline = true }
+        end
+
+        SendPresentLog(
+            'Present Placed',
+            ('%s (%s) placed a present.'):format(name, identifier),
+            0x2ecc71,
+            fields
+        )
     end)
 end)
 
@@ -278,6 +378,13 @@ RegisterCommand('presentdelete', function(source, args, _)
             title = Config.NotifyTitle,
             description = Config.NoPermissionMessage
         })
+
+        local name, identifier = GetPlayerInfo(source)
+        SendPresentLog(
+            'Present Delete - No Permission',
+            ('%s (%s) tried to use `/presentdelete` without permission.'):format(name, identifier),
+            0xe74c3c
+        )
         return
     end
 
@@ -287,6 +394,7 @@ RegisterCommand('presentdelete', function(source, args, _)
 
     local coords = GetEntityCoords(ped)
     local closestId, closestDist
+    local closestData
 
     for id, p in pairs(activePresents) do
         local dx = coords.x - p.x
@@ -296,6 +404,7 @@ RegisterCommand('presentdelete', function(source, args, _)
         if not closestDist or dist < closestDist then
             closestDist = dist
             closestId = id
+            closestData = p
         end
     end
 
@@ -306,6 +415,13 @@ RegisterCommand('presentdelete', function(source, args, _)
             title = Config.NotifyTitle,
             description = Config.NoPresentNearbyMessage
         })
+
+        local name, identifier = GetPlayerInfo(src)
+        SendPresentLog(
+            'Present Delete - None Nearby',
+            ('%s (%s) used `/presentdelete` but no present was within %.1fm.'):format(name, identifier, maxDist),
+            0xf1c40f
+        )
         return
     end
 
@@ -318,6 +434,29 @@ RegisterCommand('presentdelete', function(source, args, _)
         title = Config.NotifyTitle,
         description = Config.PresentDeletedMessage:format(closestId)
     })
+
+    local name, identifier = GetPlayerInfo(src)
+    local fields
+    if closestData then
+        fields = {
+            { name = 'Present ID', value = tostring(closestId),                                                            inline = true },
+            { name = 'Model',      value = tostring(closestData.model),                                                    inline = true },
+            { name = 'Coords',     value = ('x=%.2f, y=%.2f, z=%.2f'):format(closestData.x, closestData.y, closestData.z), inline = false },
+            { name = 'Distance',   value = ('%.2fm'):format(closestDist),                                                  inline = true }
+        }
+    else
+        fields = {
+            { name = 'Present ID', value = tostring(closestId),           inline = true },
+            { name = 'Distance',   value = ('%.2fm'):format(closestDist), inline = true }
+        }
+    end
+
+    SendPresentLog(
+        'Present Deleted',
+        ('%s (%s) deleted a present.'):format(name, identifier),
+        0xe67e22,
+        fields
+    )
 end, false)
 
 RegisterCommand('presentlocate', function(source, args, _)
@@ -332,10 +471,24 @@ RegisterCommand('presentlocate', function(source, args, _)
             title = Config.NotifyTitle,
             description = Config.NoPermissionMessage
         })
+
+        local name, identifier = GetPlayerInfo(source)
+        SendPresentLog(
+            'Present Locate - No Permission',
+            ('%s (%s) tried to use `/presentlocate` without permission.'):format(name, identifier),
+            0xe74c3c
+        )
         return
     end
 
     TriggerClientEvent('ug_presents:togglePresentBlips', source)
+
+    local name, identifier = GetPlayerInfo(source)
+    SendPresentLog(
+        'Present Locate Toggled',
+        ('%s (%s) toggled present blips with `/presentlocate`.'):format(name, identifier),
+        0x9b59b6
+    )
 end, false)
 
 RegisterCommand('presentcleanexpired', function(source, args, _)
@@ -346,6 +499,13 @@ RegisterCommand('presentcleanexpired', function(source, args, _)
                 title = Config.NotifyTitle,
                 description = Config.NoPermissionMessage
             })
+
+            local name, identifier = GetPlayerInfo(source)
+            SendPresentLog(
+                'Present CleanExpired - No Permission',
+                ('%s (%s) tried to use `/presentcleanexpired` without permission.'):format(name, identifier),
+                0xe74c3c
+            )
         end
         return
     end
@@ -361,8 +521,20 @@ RegisterCommand('presentcleanexpired', function(source, args, _)
                     title = Config.NotifyTitle,
                     description = 'No expired presents to clean.'
                 })
+
+                local name, identifier = GetPlayerInfo(src)
+                SendPresentLog(
+                    'Present CleanExpired - None',
+                    ('%s (%s) ran `/presentcleanexpired` but there were no expired presents.'):format(name, identifier),
+                    0xf1c40f
+                )
             else
                 print('[ug_presents] No expired presents to clean.')
+                SendPresentLog(
+                    'Present CleanExpired - None',
+                    'Console ran `/presentcleanexpired` but there were no expired presents.',
+                    0xf1c40f
+                )
             end
             return
         end
@@ -383,8 +555,26 @@ RegisterCommand('presentcleanexpired', function(source, args, _)
                 title = Config.NotifyTitle,
                 description = ('Cleaned %d expired presents.'):format(count)
             })
+
+            local name, identifier = GetPlayerInfo(src)
+            SendPresentLog(
+                'Present CleanExpired',
+                ('%s (%s) cleaned **%d** expired presents.'):format(name, identifier, count),
+                0x2ecc71,
+                {
+                    { name = 'Count', value = tostring(count), inline = true }
+                }
+            )
         else
             print(('[ug_presents] Cleaned %d expired presents.'):format(count))
+            SendPresentLog(
+                'Present CleanExpired',
+                ('Console cleaned **%d** expired presents.'):format(count),
+                0x2ecc71,
+                {
+                    { name = 'Count', value = tostring(count), inline = true }
+                }
+            )
         end
     end)
 end, false)
@@ -397,6 +587,13 @@ RegisterCommand('presentcleanup', function(source, args, _)
                 title = Config.NotifyTitle,
                 description = Config.NoPermissionMessage
             })
+
+            local name, identifier = GetPlayerInfo(source)
+            SendPresentLog(
+                'Present Cleanup - No Permission',
+                ('%s (%s) tried to use `/presentcleanup` without permission.'):format(name, identifier),
+                0xe74c3c
+            )
         end
         return
     end
@@ -405,8 +602,10 @@ RegisterCommand('presentcleanup', function(source, args, _)
 
     MySQL.update('DELETE FROM ug_presents', {})
 
+    local removedCount = 0
     for id, _ in pairs(activePresents) do
         TriggerClientEvent('ug_presents:removePresent', -1, id)
+        removedCount = removedCount + 1
     end
     activePresents = {}
 
@@ -416,8 +615,26 @@ RegisterCommand('presentcleanup', function(source, args, _)
             title = Config.NotifyTitle,
             description = 'All presents have been cleaned up.'
         })
+
+        local name, identifier = GetPlayerInfo(src)
+        SendPresentLog(
+            'Present Cleanup',
+            ('%s (%s) cleaned up ALL presents.'):format(name, identifier),
+            0xe74c3c,
+            {
+                { name = 'Removed Count', value = tostring(removedCount), inline = true }
+            }
+        )
     else
         print('[ug_presents] All presents have been cleaned up.')
+        SendPresentLog(
+            'Present Cleanup',
+            ('Console cleaned up ALL presents (removed %d).'):format(removedCount),
+            0xe74c3c,
+            {
+                { name = 'Removed Count', value = tostring(removedCount), inline = true }
+            }
+        )
     end
 end, false)
 
@@ -432,6 +649,14 @@ RegisterNetEvent('ug_presents:pickupPresent', function(presentId)
             title = Config.NotifyTitle,
             description = Config.NoRewardsMessage
         })
+
+        local name, identifier = GetPlayerInfo(src)
+        SendPresentLog(
+            'Present Pickup - No Rewards Configured',
+            ('%s (%s) tried to pick up present ID %s but no rewards are configured.'):format(name, identifier,
+                tostring(presentId)),
+            0xe74c3c
+        )
         return
     end
 
@@ -454,6 +679,14 @@ RegisterNetEvent('ug_presents:pickupPresent', function(presentId)
             title = Config.NotifyTitle,
             description = Config.PresentTakenMessage
         })
+
+        local name, identifier = GetPlayerInfo(src)
+        SendPresentLog(
+            'Present Pickup - Already Taken',
+            ('%s (%s) tried to pick up present ID %s but it was already gone.'):format(name, identifier,
+                tostring(presentId)),
+            0xf1c40f
+        )
         return
     end
 
@@ -469,12 +702,32 @@ RegisterNetEvent('ug_presents:pickupPresent', function(presentId)
             title = Config.NotifyTitle,
             description = Config.PresentExpiredMessage or 'This present has expired.'
         })
+
+        local name, identifier = GetPlayerInfo(src)
+        SendPresentLog(
+            'Present Pickup - Expired',
+            ('%s (%s) tried to pick up present ID %s but it was expired and has been deleted.'):format(name, identifier,
+                tostring(presentId)),
+            0xf1c40f,
+            {
+                { name = 'Present ID', value = tostring(presentId),     inline = true },
+                { name = 'Model',      value = tostring(present.model), inline = true }
+            }
+        )
         return
     end
 
     local reward = Config.Rewards[math.random(1, #Config.Rewards)]
     if not reward or not reward.item then
         processingPresents[presentId] = nil
+
+        local name, identifier = GetPlayerInfo(src)
+        SendPresentLog(
+            'Present Pickup - Invalid Reward',
+            ('%s (%s) picked up present ID %s but selected reward entry was invalid.'):format(name, identifier,
+                tostring(presentId)),
+            0xe74c3c
+        )
         return
     end
 
@@ -489,6 +742,20 @@ RegisterNetEvent('ug_presents:pickupPresent', function(presentId)
             title = Config.NotifyTitle,
             description = Config.InventoryFullMessage
         })
+
+        local name, identifier = GetPlayerInfo(src)
+        SendPresentLog(
+            'Present Pickup - Inventory Full',
+            ('%s (%s) tried to receive reward `%s` x%d from present ID %s but inventory was full.'):format(
+                name, identifier, reward.item, amount, tostring(presentId)
+            ),
+            0xe67e22,
+            {
+                { name = 'Present ID',  value = tostring(presentId),   inline = true },
+                { name = 'Reward Item', value = tostring(reward.item), inline = true },
+                { name = 'Amount',      value = tostring(amount),      inline = true }
+            }
+        )
         return
     end
 
@@ -505,6 +772,29 @@ RegisterNetEvent('ug_presents:pickupPresent', function(presentId)
         title = Config.NotifyTitle,
         description = Config.ReceivedMessage:format(amount, label)
     })
+
+    local name, identifier = GetPlayerInfo(src)
+    local fields = {
+        { name = 'Present ID',  value = tostring(presentId),     inline = true },
+        { name = 'Model',       value = tostring(present.model), inline = true },
+        { name = 'Reward Item', value = tostring(reward.item),   inline = true },
+        { name = 'Amount',      value = tostring(amount),        inline = true }
+    }
+
+    if present.x and present.y and present.z then
+        fields[#fields + 1] = {
+            name = 'Present Coords',
+            value = ('x=%.2f, y=%.2f, z=%.2f'):format(present.x, present.y, present.z),
+            inline = false
+        }
+    end
+
+    SendPresentLog(
+        'Present Picked Up',
+        ('%s (%s) picked up a present and received `%s` x%d.'):format(name, identifier, reward.item, amount),
+        0x2ecc71,
+        fields
+    )
 
     processingPresents[presentId] = nil
 end)
